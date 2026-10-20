@@ -1,72 +1,64 @@
 # Live Quiz Competition
 
-## Project Summary
-**Category:** Real-Time & Collaboration  
-**Difficulty:** Intermediate  
-**Suggested team split:** Quiz management, timer/scoring, live sessions, leaderboard 
+A live quiz MVP with a React host/participant interface and a FastAPI backend. Product scope is in [PLAN.md](PLAN.md), visual guidance is in [DESIGN.md](DESIGN.md), and contributor conventions are in [AGENTS.md](AGENTS.md).
 
-## Description
-This project is a good fit for a small team that wants to build something real and usable in a short amount of time. It focuses on one clear feature, clean data flow, and a simple user experience that can be demoed without extra fluff. The goal is to turn a good idea into a working MVP with a solid backend, a basic interface, and a realistic set of edge cases.
+## First iteration
 
-## Scope
-Hosts create quizzes, participants answer timed questions, and leaderboards update each round.
+The initial slice supports quiz creation (1–20 questions, 2–4 answers, 5–300 second timer setting), separate participant and private host links, joining a lobby with a unique display name, and a host view of joined participants. The browser never receives correct answers through participant endpoints. Host and reconnect secrets are stored as hashes and issued only when needed.
 
-## Core Features
-- Deliver the main user flow from start to finish.
-- Support the required data model and user interactions.
-- Handle validation, edge cases, and error states cleanly.
-- Include basic monitoring, feedback, or reporting where relevant.
-- Make the app easy to explain during a live demo.
+This iteration uses SQLite by default for quick local setup and accepts a PostgreSQL `DATABASE_URL`. Lobby updates are manual refreshes. Timed gameplay, WebSockets, durable reconnect, migrations, BetterAuth admin, rate limiting, and deployment are future milestones from `PLAN.md`; this is not yet production ready.
 
-## Deliverables
-- A working deployed application or API demo
-- A clear README with setup instructions and environment variables
-- A minimal database schema or data model definition
-- UI screens or API endpoints for the core MVP
-- A basic test strategy covering the happy path and one major failure path
-- A short demo script explaining the architecture, choices, and trade-offs
+## Repository layout
 
-## Suggested Architecture
-- Frontend: simple dashboard, form-based interface, or lightweight visual layer
-- Backend: API or service layer for business logic and validation
-- Data layer: database, in-memory persistence, or structured file storage for MVP use
-- Optional extras: auth, async jobs, scheduling, WebSockets, caching, or notifications depending on the project
+```text
+frontend/                 Vite + React client
+  src/App.jsx             Quiz creation, join, and lobby views
+  src/styles.css          Design tokens, responsive layout, and motion
+backend/                  FastAPI service
+  app/main.py             API routes and application setup
+  app/models.py           SQLAlchemy event and participant models
+  app/schemas.py          Request validation
+  app/database.py         Database configuration
+```
 
-## Learning Outcomes
-Scheduling, WebSockets, scoring
+## Run locally
 
-## Recommended MVP Checklist
-1. Define the main user flow and success criteria.
-2. Build the data model and core backend logic.
-3. Connect the UI or client to the main application flow.
-4. Add key validation, security checks, and realistic error states.
-5. Test the happy path and at least one important edge case.
-6. Deploy the app and document the setup clearly.
+Requirements: Python 3.10+ and Node.js 20.19+ or 22.12+.
 
-## Free Deployment Options
-Render or Railway for the app; Vercel or Netlify for the frontend; Supabase Realtime for collaboration data.
+Start the API in one terminal:
 
-## Good Free Hosting Choices
-- Static frontend: Vercel, Netlify, or GitHub Pages
-- API/backend: Render, Railway, or Fly.io
-- Database/realtime services: Supabase, Neon, Firebase, or Cloudflare D1
-- Documentation/demo pages: GitHub Pages, Cloudflare Pages, or Vercel
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+python -m uvicorn app.main:app --reload --env-file .env
+```
 
-## Typical Tech Stack
-- Frontend: React, Next.js, plain HTML/JS, or similar lightweight UI tooling
-- Backend: Node.js, Python (Flask/FastAPI), or Java/Spring Boot
-- Database: Postgres, SQLite, Supabase, or a simple file-based store
-- Real-time layer: WebSockets, polling, or background workers if needed
+The API is at `http://localhost:8000`; interactive API documentation is at `/docs`. With `DATABASE_URL` unset, the API creates `backend/quiz.db` for local development. To use PostgreSQL, uncomment and set `DATABASE_URL` in `backend/.env`, for example `postgresql+psycopg://quiz:quiz@localhost:5432/quiz`. `FRONTEND_ORIGINS` is a comma-separated list of allowed browser origins.
 
-## Final Demo Expectations
-- Provide a working URL with sample or seeded data
-- Show one clear end-to-end flow from start to finish
-- Explain the most important technical decisions and trade-offs
-- Include screenshots, screen recordings, or a brief live walk-through
-- Highlight what was completed in the MVP and what would be next if the project continued
+Start the frontend in another terminal:
 
-## Next Improvements
-- Add authorization, auditing, or stronger validation
-- Improve test coverage and resilience
-- Add analytics, metrics, or observability
-- Expand functionality once the core MVP is stable
+```bash
+cd frontend
+cp .env.example .env
+npm install
+npm run dev
+```
+
+Open the Vite URL (usually `http://localhost:5173`). Set `VITE_API_URL` in `frontend/.env` if the API uses another address. Create a quiz, open its host link in one browser tab, and visit the participant link in another. `npm run build` creates a static production build in `frontend/dist/`.
+
+## API outline
+
+- `GET /api/health` — liveness check.
+- `POST /api/quizzes` — validate and create a quiz; returns the public join URL and one-time private host URL.
+- `GET /api/events/{join_code}` — return public lobby metadata.
+- `POST /api/events/{join_code}/participants` — join a lobby; returns a one-time reconnect token.
+- `GET /api/host/{event_id}` — return host-only lobby details; requires `Authorization: Bearer <token>`.
+
+## Security and development notes
+
+Treat host links and participant reconnect tokens as bearer secrets. Keep `.env` files out of version control. The host URL keeps its credential in the URL fragment so browsers do not send it as part of the HTTP request; the frontend uses it only in the authorization header. Database tables are currently created automatically at API startup; add versioned migrations before evolving a deployed database.
+
+No automated test suite or linter is configured in this first iteration. Add coverage for quiz validation, display-name conflicts, host authorization, and the complete timed game flow as those milestones are implemented.

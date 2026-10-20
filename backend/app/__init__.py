@@ -1,0 +1,1 @@
+"""Live Quiz Competition API."""
