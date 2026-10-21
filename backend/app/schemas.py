@@ -54,3 +54,7 @@ class ParticipantJoin(BaseModel):
         if not value:
             raise ValueError("Name cannot be blank")
         return value
+
+
+class AnswerSubmit(BaseModel):
+    choice_index: int = Field(ge=0, le=3)

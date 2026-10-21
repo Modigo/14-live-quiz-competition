@@ -1,24 +1,50 @@
 import hashlib
+import asyncio
 import os
 import secrets
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, select
+from sqlalchemy import func, inspect, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from .database import Base, engine, get_db
-from .models import Choice, Event, Participant, Question
-from .schemas import ParticipantJoin, QuizCreate
+from .database import Base, SessionLocal, engine, get_db
+from .models import Choice, Event, Participant, ParticipantAnswer, Question
+from .schemas import AnswerSubmit, ParticipantJoin, QuizCreate
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    # create_all does not add columns to an existing SQLite/Postgres events table.
+    columns = {column["name"] for column in inspect(engine).get_columns("events")}
+    with engine.begin() as connection:
+        if "current_question_position" not in columns:
+            connection.exec_driver_sql("ALTER TABLE events ADD COLUMN current_question_position INTEGER")
+        if "timer_deadline" not in columns:
+            connection.exec_driver_sql("ALTER TABLE events ADD COLUMN timer_deadline TIMESTAMP WITH TIME ZONE")
+    # Older versions could persist an active state but had no timer fields.
+    with SessionLocal() as db:
+        legacy_active_events = db.scalars(select(Event).where(
+            Event.state == "active",
+            Event.current_question_position.is_(None),
+        )).all()
+        for event in legacy_active_events:
+            event.current_question_position = 0
+            event.timer_deadline = datetime.now(timezone.utc) + timedelta(seconds=event.questions[0].time_limit_seconds)
+        if legacy_active_events:
+            db.commit()
+    timer_task = asyncio.create_task(timer_worker())
     yield
+    timer_task.cancel()
+    try:
+        await timer_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(title="Live Quiz Competition API", version="0.1.0", lifespan=lifespan)
@@ -41,6 +67,62 @@ def lookup_event(db: Session, join_code: str) -> Event:
     if event is None:
         raise HTTPException(status_code=404, detail="Quiz not found")
     return event
+
+
+def utc_datetime(value: datetime) -> datetime:
+    return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def question_payload(question: Question) -> dict:
+    return {
+        "position": question.position,
+        "prompt": question.prompt,
+        "choices": [choice.text for choice in question.choices],
+        "time_limit_seconds": question.time_limit_seconds,
+    }
+
+
+def advance_expired_event(db: Session, event: Event, now: datetime | None = None) -> bool:
+    if event.state != "active" or event.timer_deadline is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    changed = False
+    while event.state == "active" and event.timer_deadline is not None and utc_datetime(event.timer_deadline) <= now:
+        expired_deadline = utc_datetime(event.timer_deadline)
+        next_position = (event.current_question_position or 0) + 1
+        changed = True
+        if next_position >= len(event.questions):
+            event.state = "completed"
+            event.current_question_position = None
+            event.timer_deadline = None
+        else:
+            event.current_question_position = next_position
+            event.timer_deadline = expired_deadline + timedelta(seconds=event.questions[next_position].time_limit_seconds)
+    if changed:
+        db.commit()
+    return changed
+
+
+async def timer_worker():
+    while True:
+        with SessionLocal() as db:
+            events = db.scalars(select(Event).where(Event.state == "active")).all()
+            for event in events:
+                advance_expired_event(db, event)
+        await asyncio.sleep(0.2)
+
+
+def participant_for_request(db: Session, event: Event, authorization: str | None) -> Participant:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Participant link required")
+    token = authorization.removeprefix("Bearer ").strip()
+    participant = db.scalar(select(Participant).where(
+        Participant.event_id == event.id,
+        Participant.reconnect_token_hash == token_hash(token),
+    ))
+    if participant is None or not secrets.compare_digest(participant.reconnect_token_hash, token_hash(token)):
+        raise HTTPException(status_code=403, detail="Invalid participant link")
+    return participant
 
 
 @app.get("/api/health")
@@ -137,32 +219,72 @@ def get_participant_event_state(
     authorization: str | None = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Participant link required")
-    token = authorization.removeprefix("Bearer ").strip()
     event = lookup_event(db, join_code)
-    participant = db.scalar(
-        select(Participant).where(
-            Participant.event_id == event.id,
-            Participant.reconnect_token_hash == token_hash(token),
-        )
-    )
-    if participant is None or not secrets.compare_digest(
-        participant.reconnect_token_hash, token_hash(token)
-    ):
-        raise HTTPException(status_code=403, detail="Invalid participant link")
-
-    result = {"title": event.title, "join_code": event.join_code, "state": event.state}
-    if event.state != "lobby":
-        result["questions"] = [
-            {
-                "prompt": question.prompt,
-                "choices": [choice.text for choice in question.choices],
-                "time_limit_seconds": question.time_limit_seconds,
-            }
-            for question in event.questions
-        ]
+    participant = participant_for_request(db, event, authorization)
+    advance_expired_event(db, event)
+    result = {
+        "title": event.title,
+        "join_code": event.join_code,
+        "state": event.state,
+        "participant_display_name": participant.display_name,
+    }
+    if event.state == "active" and event.current_question_position is not None:
+        question = event.questions[event.current_question_position]
+        answer = db.scalar(select(ParticipantAnswer).where(
+            ParticipantAnswer.participant_id == participant.id,
+            ParticipantAnswer.question_id == question.id,
+        ))
+        now = datetime.now(timezone.utc)
+        result.update({
+            "current_question_position": event.current_question_position,
+            "question_count": len(event.questions),
+            "current_question": question_payload(question),
+            "deadline_at": utc_datetime(event.timer_deadline).isoformat(),
+            "server_time": now.isoformat(),
+            "answer_choice_index": answer.choice_index if answer else None,
+        })
+    elif event.state == "completed":
+        result["question_count"] = len(event.questions)
     return result
+
+
+@app.post("/api/events/{join_code}/answers", status_code=status.HTTP_201_CREATED)
+def submit_participant_answer(
+    join_code: str,
+    payload: AnswerSubmit,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    event = lookup_event(db, join_code)
+    participant = participant_for_request(db, event, authorization)
+    advance_expired_event(db, event)
+    if event.state != "active" or event.current_question_position is None:
+        raise HTTPException(status_code=409, detail="There is no active question")
+    question = event.questions[event.current_question_position]
+    if payload.choice_index >= len(question.choices):
+        raise HTTPException(status_code=422, detail="Choose one of the available answers")
+    if utc_datetime(event.timer_deadline) <= datetime.now(timezone.utc):
+        advance_expired_event(db, event)
+        raise HTTPException(status_code=409, detail="Time has expired for this question")
+    existing = db.scalar(select(ParticipantAnswer).where(
+        ParticipantAnswer.participant_id == participant.id,
+        ParticipantAnswer.question_id == question.id,
+    ))
+    if existing:
+        raise HTTPException(status_code=409, detail="Your answer is already locked")
+    answer = ParticipantAnswer(
+        participant_id=participant.id,
+        question_id=question.id,
+        choice_index=payload.choice_index,
+        submitted_at=datetime.now(timezone.utc),
+    )
+    db.add(answer)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Your answer is already locked") from None
+    return {"state": "accepted", "choice_index": answer.choice_index}
 
 
 @app.get("/api/host/{event_id}")
@@ -197,5 +319,7 @@ def start_host_event(event_id: str, authorization: str | None = Header(default=N
         raise HTTPException(status_code=409, detail="This quiz has already started")
 
     event.state = "active"
+    event.current_question_position = 0
+    event.timer_deadline = datetime.now(timezone.utc) + timedelta(seconds=event.questions[0].time_limit_seconds)
     db.commit()
     return {"state": event.state}

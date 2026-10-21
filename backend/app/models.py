@@ -18,6 +18,8 @@ class Event(Base):
     join_code: Mapped[str] = mapped_column(String(8), unique=True, index=True, nullable=False)
     host_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     state: Mapped[str] = mapped_column(String(20), default="lobby", nullable=False)
+    current_question_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timer_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     questions: Mapped[list["Question"]] = relationship(
         back_populates="event", cascade="all, delete-orphan", order_by="Question.position"
@@ -63,3 +65,14 @@ class Participant(Base):
     reconnect_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     event: Mapped[Event] = relationship(back_populates="participants")
+
+
+class ParticipantAnswer(Base):
+    __tablename__ = "participant_answers"
+    __table_args__ = (UniqueConstraint("participant_id", "question_id", name="uq_participant_question_answer"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    participant_id: Mapped[str] = mapped_column(ForeignKey("participants.id", ondelete="CASCADE"), nullable=False)
+    question_id: Mapped[int] = mapped_column(ForeignKey("questions.id", ondelete="CASCADE"), nullable=False)
+    choice_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
