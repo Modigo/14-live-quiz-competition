@@ -30,6 +30,9 @@ export default function App() {
   const [event, setEvent] = useState(null);
   const [hostInfo, setHostInfo] = useState(null);
   const [participant, setParticipant] = useState(null);
+  const [participantStarted, setParticipantStarted] = useState(false);
+  const [questionIndex, setQuestionIndex] = useState(0);
+  const [answers, setAnswers] = useState({});
   const [joinForm, setJoinForm] = useState({ name: '', display_name: '' });
   const [title, setTitle] = useState('');
   const [questions, setQuestions] = useState([blankQuestion()]);
@@ -55,6 +58,17 @@ export default function App() {
     }
     return () => { alive = false; };
   }, [joinCode, hostEventId, hostToken]);
+
+  useEffect(() => {
+    if (!joinCode || !participant?.reconnect_token) return undefined;
+    let alive = true;
+    const refreshParticipantState = () => api(`/api/events/${encodeURIComponent(joinCode)}/state`, {
+      headers: { Authorization: `Bearer ${participant.reconnect_token}` },
+    }).then((data) => alive && setEvent(data)).catch((reason) => alive && setError(reason.message));
+    refreshParticipantState();
+    const interval = window.setInterval(refreshParticipantState, 2000);
+    return () => { alive = false; window.clearInterval(interval); };
+  }, [joinCode, participant?.reconnect_token]);
 
   function navigate(path) {
     window.history.pushState({}, '', path);
@@ -101,6 +115,9 @@ export default function App() {
       });
       sessionStorage.setItem(`quiz:${joinCode}:reconnect`, result.reconnect_token);
       setParticipant(result);
+      setQuestionIndex(0);
+      setAnswers({});
+      setParticipantStarted(false);
     } catch (reason) {
       setError(reason.message);
     } finally {
@@ -110,6 +127,21 @@ export default function App() {
 
   async function copy(value) {
     try { await navigator.clipboard.writeText(value); } catch { setError('Clipboard access is unavailable. Copy the link manually.'); }
+  }
+
+  async function startQuiz() {
+    setBusy(true);
+    setError('');
+    try {
+      await api(`/api/host/${hostEventId}/start`, {
+        method: 'POST', headers: { Authorization: `Bearer ${hostToken}` },
+      });
+      setHostInfo((current) => ({ ...current, state: 'active' }));
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -157,17 +189,23 @@ export default function App() {
         {view === 'join' && <div className="join-wrap">
           <button className="back-link" onClick={() => navigate('/')}><ArrowLeft size={15} /> Create a quiz</button>
           {error && !event ? <div className="notice-card error-message" role="alert">{error}</div> : event && !participant ? <>
-            <div className="eyebrow"><span className="eyebrow-line" />YOU’RE INVITED<span className="eyebrow-line" /></div>
-            <h1 className="join-title">{event.title}<br /><span className="gradient-text">starts with you.</span></h1>
+            <div className="eyebrow"><span className="eyebrow-line" />{event.state === 'active' ? 'TEST IN PROGRESS' : 'YOU’RE INVITED'}<span className="eyebrow-line" /></div>
+            <h1 className="join-title">{event.title}<br /><span className="gradient-text">{event.state === 'active' ? 'join in.' : 'starts with you.'}</span></h1>
             <div className="join-meta"><span><Users size={16} /> {event.participant_count} here</span><span className="meta-divider" /><span>ROOM {event.join_code}</span></div>
             <form className="join-card" onSubmit={joinQuiz}>
-              <h2>Save your seat.</h2><p>Pick a name your friends will recognize.</p>
+              <h2>{event.state === 'active' ? 'Join the test.' : 'Save your seat.'}</h2><p>Pick a name your friends will recognize.</p>
               <label className="field-label" htmlFor="player-name">YOUR NAME</label><input id="player-name" className="text-input" maxLength="80" autoComplete="name" placeholder="Your name" value={joinForm.name} onChange={(e) => setJoinForm({ ...joinForm, name: e.target.value })} required />
               <label className="field-label" htmlFor="display-name">DISPLAY NAME</label><input id="display-name" className="text-input" maxLength="32" placeholder="How you’ll appear on the leaderboard" value={joinForm.display_name} onChange={(e) => setJoinForm({ ...joinForm, display_name: e.target.value })} required />
               {error && <p className="error-message" role="alert">{error}</p>}
-              <button className="primary-button full-button" disabled={busy}>{busy ? 'Joining…' : <>Join the lobby <ArrowRight size={17} /></>}</button>
+              <button className="primary-button full-button" disabled={busy}>{busy ? 'Joining…' : <>{event.state === 'active' ? 'Join the test' : 'Join the lobby'} <ArrowRight size={17} /></>}</button>
             </form>
-          </> : participant && <div className="lobby-card"><span className="lobby-orbit"><Radio size={26} /></span><div className="eyebrow"><span className="eyebrow-line" />YOU’RE IN<span className="eyebrow-line" /></div><h1 className="lobby-title">Stay close,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">You’re in the lobby for <strong>{event.title}</strong>.<br />The host will start the game soon.</p><div className="waiting-status"><span className="pulse-dot" /> WAITING FOR THE HOST</div></div>}
+          </> : participant && event.state === 'lobby' && <div className="lobby-card"><span className="lobby-orbit"><Radio size={26} /></span><div className="eyebrow"><span className="eyebrow-line" />YOU’RE IN<span className="eyebrow-line" /></div><h1 className="lobby-title">Stay close,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">You’re in the lobby for <strong>{event.title}</strong>.<br />The host will start the game soon.</p><div className="waiting-status"><span className="pulse-dot" /> WAITING FOR THE HOST</div></div>}
+          {participant && event.state !== 'lobby' && !participantStarted && <div className="lobby-card"><span className="lobby-orbit"><Check size={26} /></span><div className="eyebrow"><span className="eyebrow-line" />THE QUIZ IS READY<span className="eyebrow-line" /></div><h1 className="lobby-title">You’re up,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">{event.title} is ready. Start when you’re settled.</p><button className="primary-button participant-start-button" onClick={() => setParticipantStarted(true)}>Start the test <ArrowRight size={17} /></button></div>}
+          {participant && participantStarted && event.questions?.length > 0 && (() => {
+            const question = event.questions[questionIndex];
+            if (!question) return <div className="lobby-card"><span className="eyebrow"><span className="eyebrow-line" />TEST COMPLETE<span className="eyebrow-line" /></span><h1 className="lobby-title">Nice work,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">You’ve completed the test.</p></div>;
+            return <div className="participant-test"><div className="eyebrow"><span className="eyebrow-line" />{event.title}<span className="eyebrow-line" /></div><div className="test-progress">QUESTION {String(questionIndex + 1).padStart(2, '0')} <span>OF {String(event.questions.length).padStart(2, '0')}</span></div><h1 className="test-question">{question.prompt}</h1><div className="test-choices">{question.choices.map((choice, index) => <button key={index} className={`test-choice ${answers[questionIndex] === index ? 'selected' : ''}`} aria-pressed={answers[questionIndex] === index} onClick={() => setAnswers((current) => ({ ...current, [questionIndex]: index }))}><span>{String.fromCharCode(65 + index)}</span>{choice}</button>)}</div><button className="primary-button test-next-button" disabled={answers[questionIndex] === undefined} onClick={() => setQuestionIndex((index) => index + 1)}>{questionIndex === event.questions.length - 1 ? 'Finish test' : 'Next question'} <ArrowRight size={17} /></button></div>;
+          })()}
         </div>}
 
         {view === 'host' && <div className="host-wrap">
@@ -177,7 +215,9 @@ export default function App() {
             <div className="players-card"><div className="players-heading"><div><span className="section-kicker">THE CROWD</span><h2>Players in the lobby</h2></div><span className="live-pill"><span className="status-dot" /> {hostInfo.state.toUpperCase()}</span></div>
               {hostInfo.participants.length ? <div className="player-list">{hostInfo.participants.map((player, index) => <div className="player-row" key={`${player.display_name}-${index}`}><span className="player-avatar">{player.display_name.slice(0, 1).toUpperCase()}</span><span>{player.display_name}</span><span className="player-private">{player.name}</span></div>)}</div> : <div className="empty-players"><Users size={22} /><p>Share the join code and your players will appear here.</p></div>}
               <button className="refresh-button" onClick={() => api(`/api/host/${hostEventId}`, { headers: { Authorization: `Bearer ${hostToken}` } }).then(setHostInfo).catch((reason) => setError(reason.message))}><Radio size={15} /> Refresh lobby</button>
-            </div><p className="private-note">Lobby refresh is manual in this first iteration. Live updates arrive in a later milestone.</p>
+              {hostInfo.state === 'lobby' ? <button className="primary-button start-quiz-button" onClick={startQuiz} disabled={busy || hostInfo.participant_count === 0}>{busy ? 'Starting…' : <>Start quiz <ArrowRight size={17} /></>}</button> : <p className="quiz-started">Quiz started.</p>}
+              {error && <p className="error-message" role="alert">{error}</p>}
+            </div><p className="private-note">Lobby refresh is manual in this first iteration. Refresh to see new participants before starting.</p>
           </>}
         </div>}
       </section>

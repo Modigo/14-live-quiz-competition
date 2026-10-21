@@ -95,8 +95,8 @@ def get_public_event(join_code: str, db: Session = Depends(get_db)):
 @app.post("/api/events/{join_code}/participants", status_code=status.HTTP_201_CREATED)
 def join_event(join_code: str, payload: ParticipantJoin, db: Session = Depends(get_db)):
     event = lookup_event(db, join_code)
-    if event.state != "lobby":
-        raise HTTPException(status_code=409, detail="This quiz is no longer accepting lobby entries")
+    if event.state not in {"lobby", "active"}:
+        raise HTTPException(status_code=409, detail="This quiz is no longer accepting participants")
     count = db.scalar(select(func.count()).select_from(Participant).where(Participant.event_id == event.id)) or 0
     if count >= 50:
         raise HTTPException(status_code=409, detail="This quiz is full")
@@ -127,8 +127,42 @@ def join_event(join_code: str, payload: ParticipantJoin, db: Session = Depends(g
         "participant_id": participant.id,
         "display_name": participant.display_name,
         "reconnect_token": reconnect_token,
-        "state": "lobby",
+        "state": event.state,
     }
+
+
+@app.get("/api/events/{join_code}/state")
+def get_participant_event_state(
+    join_code: str,
+    authorization: str | None = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Participant link required")
+    token = authorization.removeprefix("Bearer ").strip()
+    event = lookup_event(db, join_code)
+    participant = db.scalar(
+        select(Participant).where(
+            Participant.event_id == event.id,
+            Participant.reconnect_token_hash == token_hash(token),
+        )
+    )
+    if participant is None or not secrets.compare_digest(
+        participant.reconnect_token_hash, token_hash(token)
+    ):
+        raise HTTPException(status_code=403, detail="Invalid participant link")
+
+    result = {"title": event.title, "join_code": event.join_code, "state": event.state}
+    if event.state != "lobby":
+        result["questions"] = [
+            {
+                "prompt": question.prompt,
+                "choices": [choice.text for choice in question.choices],
+                "time_limit_seconds": question.time_limit_seconds,
+            }
+            for question in event.questions
+        ]
+    return result
 
 
 @app.get("/api/host/{event_id}")
@@ -149,3 +183,19 @@ def get_host_event(event_id: str, authorization: str | None = Header(default=Non
             for participant in event.participants
         ],
     }
+
+
+@app.post("/api/host/{event_id}/start")
+def start_host_event(event_id: str, authorization: str | None = Header(default=None), db: Session = Depends(get_db)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Host link required")
+    token = authorization.removeprefix("Bearer ").strip()
+    event = db.get(Event, event_id)
+    if event is None or not secrets.compare_digest(token_hash(token), event.host_token_hash):
+        raise HTTPException(status_code=403, detail="Invalid host link")
+    if event.state != "lobby":
+        raise HTTPException(status_code=409, detail="This quiz has already started")
+
+    event.state = "active"
+    db.commit()
+    return {"state": event.state}
