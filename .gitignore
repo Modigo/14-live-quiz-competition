@@ -3,6 +3,7 @@ __pycache__/
 *.db
 .venv/
 venv/
+LiveQuiz/
 node_modules/
 frontend/dist/
 .env
