@@ -30,7 +30,6 @@ export default function App() {
   const [event, setEvent] = useState(null);
   const [hostInfo, setHostInfo] = useState(null);
   const [participant, setParticipant] = useState(null);
-  const [participantStarted, setParticipantStarted] = useState(false);
   const [questionIndex, setQuestionIndex] = useState(0);
   const [answers, setAnswers] = useState({});
   const [joinForm, setJoinForm] = useState({ name: '', display_name: '' });
@@ -117,7 +116,6 @@ export default function App() {
       setParticipant(result);
       setQuestionIndex(0);
       setAnswers({});
-      setParticipantStarted(false);
     } catch (reason) {
       setError(reason.message);
     } finally {
@@ -200,8 +198,8 @@ export default function App() {
               <button className="primary-button full-button" disabled={busy}>{busy ? 'Joining…' : <>{event.state === 'active' ? 'Join the test' : 'Join the lobby'} <ArrowRight size={17} /></>}</button>
             </form>
           </> : participant && event.state === 'lobby' && <div className="lobby-card"><span className="lobby-orbit"><Radio size={26} /></span><div className="eyebrow"><span className="eyebrow-line" />YOU’RE IN<span className="eyebrow-line" /></div><h1 className="lobby-title">Stay close,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">You’re in the lobby for <strong>{event.title}</strong>.<br />The host will start the game soon.</p><div className="waiting-status"><span className="pulse-dot" /> WAITING FOR THE HOST</div></div>}
-          {participant && event.state !== 'lobby' && !participantStarted && <div className="lobby-card"><span className="lobby-orbit"><Check size={26} /></span><div className="eyebrow"><span className="eyebrow-line" />THE QUIZ IS READY<span className="eyebrow-line" /></div><h1 className="lobby-title">You’re up,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">{event.title} is ready. Start when you’re settled.</p><button className="primary-button participant-start-button" onClick={() => setParticipantStarted(true)}>Start the test <ArrowRight size={17} /></button></div>}
-          {participant && participantStarted && event.questions?.length > 0 && (() => {
+          {participant && event.state !== 'lobby' && !event.questions?.length && <div className="lobby-card"><span className="waiting-status"><span className="pulse-dot" /> LOADING THE TEST</span></div>}
+          {participant && event.state !== 'lobby' && event.questions?.length > 0 && (() => {
             const question = event.questions[questionIndex];
             if (!question) return <div className="lobby-card"><span className="eyebrow"><span className="eyebrow-line" />TEST COMPLETE<span className="eyebrow-line" /></span><h1 className="lobby-title">Nice work,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">You’ve completed the test.</p></div>;
             return <div className="participant-test"><div className="eyebrow"><span className="eyebrow-line" />{event.title}<span className="eyebrow-line" /></div><div className="test-progress">QUESTION {String(questionIndex + 1).padStart(2, '0')} <span>OF {String(event.questions.length).padStart(2, '0')}</span></div><h1 className="test-question">{question.prompt}</h1><div className="test-choices">{question.choices.map((choice, index) => <button key={index} className={`test-choice ${answers[questionIndex] === index ? 'selected' : ''}`} aria-pressed={answers[questionIndex] === index} onClick={() => setAnswers((current) => ({ ...current, [questionIndex]: index }))}><span>{String.fromCharCode(65 + index)}</span>{choice}</button>)}</div><button className="primary-button test-next-button" disabled={answers[questionIndex] === undefined} onClick={() => setQuestionIndex((index) => index + 1)}>{questionIndex === event.questions.length - 1 ? 'Finish test' : 'Next question'} <ArrowRight size={17} /></button></div>;

@@ -6,7 +6,6 @@
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 .start-quiz-button{width:100%;margin-top:20px}
 .quiz-started{margin:18px 0 0;text-align:center;color:#4c8670;font-size:12px;font-weight:600}
-.participant-start-button{margin-top:24px}
 .participant-test{max-width:700px;margin:35px auto 0;text-align:left}
 .test-progress{margin:38px 0 14px;color:#938a99;font:10px var(--mono);letter-spacing:1px}
 .test-progress span{color:#b8afbf;margin-left:8px}
