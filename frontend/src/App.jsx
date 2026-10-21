@@ -46,9 +46,41 @@ export default function App() {
     let alive = true;
     if (joinCode) {
       setView('join');
-      api(`/api/events/${encodeURIComponent(joinCode)}`)
-        .then((data) => alive && setEvent(data))
-        .catch((reason) => alive && setError(reason.message));
+      const reconnectToken = sessionStorage.getItem(`quiz:${joinCode}:reconnect`);
+      if (reconnectToken) {
+        api(`/api/events/${encodeURIComponent(joinCode)}/state`, {
+          headers: { Authorization: `Bearer ${reconnectToken}` },
+        }).then((data) => {
+          if (!alive) return;
+          setEvent(data);
+          setParticipant({
+            participant_id: data.participant_id,
+            display_name: data.display_name,
+            reconnect_token: reconnectToken,
+          });
+          try {
+            const progress = JSON.parse(sessionStorage.getItem(`quiz:${joinCode}:progress`) || '{}');
+            setQuestionIndex(Number.isInteger(progress.questionIndex) ? progress.questionIndex : 0);
+            setAnswers(progress.answers && typeof progress.answers === 'object' ? progress.answers : {});
+          } catch {
+            setQuestionIndex(0);
+            setAnswers({});
+          }
+        }).catch((reason) => {
+          if (!alive) return;
+          if (reason.message === 'Invalid participant link') {
+            sessionStorage.removeItem(`quiz:${joinCode}:reconnect`);
+            sessionStorage.removeItem(`quiz:${joinCode}:progress`);
+          }
+          api(`/api/events/${encodeURIComponent(joinCode)}`)
+            .then((data) => alive && setEvent(data))
+            .catch((eventError) => alive && setError(eventError.message));
+        });
+      } else {
+        api(`/api/events/${encodeURIComponent(joinCode)}`)
+          .then((data) => alive && setEvent(data))
+          .catch((reason) => alive && setError(reason.message));
+      }
     } else if (hostEventId) {
       setView('host');
       api(`/api/host/${hostEventId}`, { headers: { Authorization: `Bearer ${hostToken}` } })
@@ -115,6 +147,7 @@ export default function App() {
         method: 'POST', body: JSON.stringify(joinForm),
       });
       sessionStorage.setItem(`quiz:${joinCode}:reconnect`, result.reconnect_token);
+      sessionStorage.setItem(`quiz:${joinCode}:progress`, JSON.stringify({ questionIndex: 0, answers: {} }));
       setParticipant(result);
       setQuestionIndex(0);
       setAnswers({});
@@ -137,6 +170,7 @@ export default function App() {
         body: JSON.stringify({ name: participantJoinForm.name, display_name: participantJoinForm.display_name }),
       });
       sessionStorage.setItem(`quiz:${code}:reconnect`, result.reconnect_token);
+      sessionStorage.setItem(`quiz:${code}:progress`, JSON.stringify({ questionIndex: 0, answers: {} }));
       window.history.pushState({}, '', `/?join=${encodeURIComponent(code)}`);
       setLocation({ path: window.location.pathname, search: new URLSearchParams(window.location.search) });
       setEvent(eventInfo);
@@ -150,6 +184,14 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function saveProgress(nextQuestionIndex, nextAnswers) {
+    if (!joinCode) return;
+    sessionStorage.setItem(`quiz:${joinCode}:progress`, JSON.stringify({
+      questionIndex: nextQuestionIndex,
+      answers: nextAnswers,
+    }));
   }
 
   async function copy(value) {
@@ -247,7 +289,7 @@ export default function App() {
           {participant && event.state !== 'lobby' && event.questions?.length > 0 && (() => {
             const question = event.questions[questionIndex];
             if (!question) return <div className="lobby-card"><span className="eyebrow"><span className="eyebrow-line" />TEST COMPLETE<span className="eyebrow-line" /></span><h1 className="lobby-title">Nice work,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">You’ve completed the test.</p></div>;
-            return <div className="participant-test"><div className="eyebrow"><span className="eyebrow-line" />{event.title}<span className="eyebrow-line" /></div><div className="test-progress">QUESTION {String(questionIndex + 1).padStart(2, '0')} <span>OF {String(event.questions.length).padStart(2, '0')}</span></div><h1 className="test-question">{question.prompt}</h1><div className="test-choices">{question.choices.map((choice, index) => <button key={index} className={`test-choice ${answers[questionIndex] === index ? 'selected' : ''}`} aria-pressed={answers[questionIndex] === index} onClick={() => setAnswers((current) => ({ ...current, [questionIndex]: index }))}><span>{String.fromCharCode(65 + index)}</span>{choice}</button>)}</div><button className="primary-button test-next-button" disabled={answers[questionIndex] === undefined} onClick={() => setQuestionIndex((index) => index + 1)}>{questionIndex === event.questions.length - 1 ? 'Finish test' : 'Next question'} <ArrowRight size={17} /></button></div>;
+            return <div className="participant-test"><div className="eyebrow"><span className="eyebrow-line" />{event.title}<span className="eyebrow-line" /></div><div className="test-progress">QUESTION {String(questionIndex + 1).padStart(2, '0')} <span>OF {String(event.questions.length).padStart(2, '0')}</span></div><h1 className="test-question">{question.prompt}</h1><div className="test-choices">{question.choices.map((choice, index) => <button key={index} className={`test-choice ${answers[questionIndex] === index ? 'selected' : ''}`} aria-pressed={answers[questionIndex] === index} onClick={() => { const nextAnswers = { ...answers, [questionIndex]: index }; setAnswers(nextAnswers); saveProgress(questionIndex, nextAnswers); }}><span>{String.fromCharCode(65 + index)}</span>{choice}</button>)}</div><button className="primary-button test-next-button" disabled={answers[questionIndex] === undefined} onClick={() => { const nextQuestionIndex = questionIndex + 1; setQuestionIndex(nextQuestionIndex); saveProgress(nextQuestionIndex, answers); }}>{questionIndex === event.questions.length - 1 ? 'Finish test' : 'Next question'} <ArrowRight size={17} /></button></div>;
           })()}
         </div>}
 
