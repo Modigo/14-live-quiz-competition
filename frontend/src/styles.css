@@ -16,3 +16,8 @@
 .test-choice:hover,.test-choice.selected{border-color:#9973ba;background:#faf7fc}
 .test-choice.selected>span{background:var(--purple);color:white}
 .test-next-button{margin-top:24px;min-width:180px}
+.home-join-action{margin-top:26px}
+.secondary-button{display:inline-flex;align-items:center;justify-content:center;gap:9px;min-height:43px;padding:0 16px;border:1px solid #e5ddeb;border-radius:13px;background:#fff;color:var(--purple);font:600 12px 'Plus Jakarta Sans',sans-serif;cursor:pointer}
+.secondary-button:hover{background:#faf7fc;border-color:#cdbbdd}
+.participant-entry-card{margin:18px auto 0;text-align:left}
+.code-input{text-transform:uppercase;letter-spacing:2px;font-family:var(--mono)}

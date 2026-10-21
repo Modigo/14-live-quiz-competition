@@ -30,6 +30,8 @@ export default function App() {
   const [event, setEvent] = useState(null);
   const [hostInfo, setHostInfo] = useState(null);
   const [participant, setParticipant] = useState(null);
+  const [joinMenuOpen, setJoinMenuOpen] = useState(false);
+  const [participantJoinForm, setParticipantJoinForm] = useState({ join_code: '', name: '', display_name: '' });
   const [questionIndex, setQuestionIndex] = useState(0);
   const [answers, setAnswers] = useState({});
   const [joinForm, setJoinForm] = useState({ name: '', display_name: '' });
@@ -123,6 +125,33 @@ export default function App() {
     }
   }
 
+  async function joinByCode(eventForm) {
+    eventForm.preventDefault();
+    const code = participantJoinForm.join_code.trim().toUpperCase();
+    setBusy(true);
+    setError('');
+    try {
+      const eventInfo = await api(`/api/events/${encodeURIComponent(code)}`);
+      const result = await api(`/api/events/${encodeURIComponent(code)}/participants`, {
+        method: 'POST',
+        body: JSON.stringify({ name: participantJoinForm.name, display_name: participantJoinForm.display_name }),
+      });
+      sessionStorage.setItem(`quiz:${code}:reconnect`, result.reconnect_token);
+      window.history.pushState({}, '', `/?join=${encodeURIComponent(code)}`);
+      setLocation({ path: window.location.pathname, search: new URLSearchParams(window.location.search) });
+      setEvent(eventInfo);
+      setParticipant(result);
+      setQuestionIndex(0);
+      setAnswers({});
+      setJoinMenuOpen(false);
+      setView('join');
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function copy(value) {
     try { await navigator.clipboard.writeText(value); } catch { setError('Clipboard access is unavailable. Copy the link manually.'); }
   }
@@ -156,6 +185,22 @@ export default function App() {
           <div className="eyebrow"><span className="eyebrow-line" />MAKE A MOMENT<span className="eyebrow-line" /></div>
           <h1>Bring your<br /><span className="gradient-text">people together.</span></h1>
           <p className="hero-copy">A little friendly competition goes a long way.<br className="desktop-break" /> Build a quiz and let the room light up.</p>
+          <div className="home-join-action">
+            <button className="secondary-button" type="button" onClick={() => { setJoinMenuOpen((open) => !open); setError(''); }} aria-expanded={joinMenuOpen} aria-controls="participant-entry-form">
+              <Users size={16} /> Join a quiz
+            </button>
+          </div>
+          {joinMenuOpen && <form id="participant-entry-form" className="join-card participant-entry-card" onSubmit={joinByCode}>
+            <h2>Join with a code.</h2><p>Enter your details to join a quiz room.</p>
+            <label className="field-label" htmlFor="participant-join-code">JOIN CODE</label>
+            <input id="participant-join-code" className="text-input code-input" maxLength="8" autoComplete="off" placeholder="e.g. 9ULG0J8" value={participantJoinForm.join_code} onChange={(e) => setParticipantJoinForm({ ...participantJoinForm, join_code: e.target.value.toUpperCase() })} required />
+            <label className="field-label" htmlFor="participant-entry-name">YOUR NAME</label>
+            <input id="participant-entry-name" className="text-input" maxLength="80" autoComplete="name" placeholder="Your name" value={participantJoinForm.name} onChange={(e) => setParticipantJoinForm({ ...participantJoinForm, name: e.target.value })} required />
+            <label className="field-label" htmlFor="participant-entry-display-name">DISPLAY NAME</label>
+            <input id="participant-entry-display-name" className="text-input" maxLength="32" placeholder="How you’ll appear in the quiz" value={participantJoinForm.display_name} onChange={(e) => setParticipantJoinForm({ ...participantJoinForm, display_name: e.target.value })} required />
+            {error && <p className="error-message" role="alert">{error}</p>}
+            <button className="primary-button full-button" disabled={busy}>{busy ? 'Joining…' : <>Join quiz <ArrowRight size={17} /></>}</button>
+          </form>}
           <div className="hero-stamp"><span>01</span><span className="stamp-rule" /> CREATE YOUR QUIZ</div>
           <form className="builder" onSubmit={createQuiz}>
             <div className="builder-heading"><div><span className="section-kicker">THE SETUP</span><h2>Your quiz, your rules.</h2></div><span className="step-count">01 <i>/</i> 03</span></div>
