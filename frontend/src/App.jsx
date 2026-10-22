@@ -30,7 +30,8 @@ export default function App() {
   const [event, setEvent] = useState(null);
   const [hostInfo, setHostInfo] = useState(null);
   const [participant, setParticipant] = useState(null);
-  const [participantStarted, setParticipantStarted] = useState(false);
+  const [joinMenuOpen, setJoinMenuOpen] = useState(false);
+  const [participantJoinForm, setParticipantJoinForm] = useState({ join_code: '', name: '', display_name: '' });
   const [questionIndex, setQuestionIndex] = useState(0);
   const [answers, setAnswers] = useState({});
   const [joinForm, setJoinForm] = useState({ name: '', display_name: '' });
@@ -45,9 +46,41 @@ export default function App() {
     let alive = true;
     if (joinCode) {
       setView('join');
-      api(`/api/events/${encodeURIComponent(joinCode)}`)
-        .then((data) => alive && setEvent(data))
-        .catch((reason) => alive && setError(reason.message));
+      const reconnectToken = sessionStorage.getItem(`quiz:${joinCode}:reconnect`);
+      if (reconnectToken) {
+        api(`/api/events/${encodeURIComponent(joinCode)}/state`, {
+          headers: { Authorization: `Bearer ${reconnectToken}` },
+        }).then((data) => {
+          if (!alive) return;
+          setEvent(data);
+          setParticipant({
+            participant_id: data.participant_id,
+            display_name: data.display_name,
+            reconnect_token: reconnectToken,
+          });
+          try {
+            const progress = JSON.parse(sessionStorage.getItem(`quiz:${joinCode}:progress`) || '{}');
+            setQuestionIndex(Number.isInteger(progress.questionIndex) ? progress.questionIndex : 0);
+            setAnswers(progress.answers && typeof progress.answers === 'object' ? progress.answers : {});
+          } catch {
+            setQuestionIndex(0);
+            setAnswers({});
+          }
+        }).catch((reason) => {
+          if (!alive) return;
+          if (reason.message === 'Invalid participant link') {
+            sessionStorage.removeItem(`quiz:${joinCode}:reconnect`);
+            sessionStorage.removeItem(`quiz:${joinCode}:progress`);
+          }
+          api(`/api/events/${encodeURIComponent(joinCode)}`)
+            .then((data) => alive && setEvent(data))
+            .catch((eventError) => alive && setError(eventError.message));
+        });
+      } else {
+        api(`/api/events/${encodeURIComponent(joinCode)}`)
+          .then((data) => alive && setEvent(data))
+          .catch((reason) => alive && setError(reason.message));
+      }
     } else if (hostEventId) {
       setView('host');
       api(`/api/host/${hostEventId}`, { headers: { Authorization: `Bearer ${hostToken}` } })
@@ -114,15 +147,51 @@ export default function App() {
         method: 'POST', body: JSON.stringify(joinForm),
       });
       sessionStorage.setItem(`quiz:${joinCode}:reconnect`, result.reconnect_token);
+      sessionStorage.setItem(`quiz:${joinCode}:progress`, JSON.stringify({ questionIndex: 0, answers: {} }));
       setParticipant(result);
       setQuestionIndex(0);
       setAnswers({});
-      setParticipantStarted(false);
     } catch (reason) {
       setError(reason.message);
     } finally {
       setBusy(false);
     }
+  }
+
+  async function joinByCode(eventForm) {
+    eventForm.preventDefault();
+    const code = participantJoinForm.join_code.trim().toUpperCase();
+    setBusy(true);
+    setError('');
+    try {
+      const eventInfo = await api(`/api/events/${encodeURIComponent(code)}`);
+      const result = await api(`/api/events/${encodeURIComponent(code)}/participants`, {
+        method: 'POST',
+        body: JSON.stringify({ name: participantJoinForm.name, display_name: participantJoinForm.display_name }),
+      });
+      sessionStorage.setItem(`quiz:${code}:reconnect`, result.reconnect_token);
+      sessionStorage.setItem(`quiz:${code}:progress`, JSON.stringify({ questionIndex: 0, answers: {} }));
+      window.history.pushState({}, '', `/?join=${encodeURIComponent(code)}`);
+      setLocation({ path: window.location.pathname, search: new URLSearchParams(window.location.search) });
+      setEvent(eventInfo);
+      setParticipant(result);
+      setQuestionIndex(0);
+      setAnswers({});
+      setJoinMenuOpen(false);
+      setView('join');
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function saveProgress(nextQuestionIndex, nextAnswers) {
+    if (!joinCode) return;
+    sessionStorage.setItem(`quiz:${joinCode}:progress`, JSON.stringify({
+      questionIndex: nextQuestionIndex,
+      answers: nextAnswers,
+    }));
   }
 
   async function copy(value) {
@@ -158,6 +227,22 @@ export default function App() {
           <div className="eyebrow"><span className="eyebrow-line" />MAKE A MOMENT<span className="eyebrow-line" /></div>
           <h1>Bring your<br /><span className="gradient-text">people together.</span></h1>
           <p className="hero-copy">A little friendly competition goes a long way.<br className="desktop-break" /> Build a quiz and let the room light up.</p>
+          <div className="home-join-action">
+            <button className="secondary-button" type="button" onClick={() => { setJoinMenuOpen((open) => !open); setError(''); }} aria-expanded={joinMenuOpen} aria-controls="participant-entry-form">
+              <Users size={16} /> Join a quiz
+            </button>
+          </div>
+          {joinMenuOpen && <form id="participant-entry-form" className="join-card participant-entry-card" onSubmit={joinByCode}>
+            <h2>Join with a code.</h2><p>Enter your details to join a quiz room.</p>
+            <label className="field-label" htmlFor="participant-join-code">JOIN CODE</label>
+            <input id="participant-join-code" className="text-input code-input" maxLength="8" autoComplete="off" placeholder="e.g. 9ULG0J8" value={participantJoinForm.join_code} onChange={(e) => setParticipantJoinForm({ ...participantJoinForm, join_code: e.target.value.toUpperCase() })} required />
+            <label className="field-label" htmlFor="participant-entry-name">YOUR NAME</label>
+            <input id="participant-entry-name" className="text-input" maxLength="80" autoComplete="name" placeholder="Your name" value={participantJoinForm.name} onChange={(e) => setParticipantJoinForm({ ...participantJoinForm, name: e.target.value })} required />
+            <label className="field-label" htmlFor="participant-entry-display-name">DISPLAY NAME</label>
+            <input id="participant-entry-display-name" className="text-input" maxLength="32" placeholder="How you’ll appear in the quiz" value={participantJoinForm.display_name} onChange={(e) => setParticipantJoinForm({ ...participantJoinForm, display_name: e.target.value })} required />
+            {error && <p className="error-message" role="alert">{error}</p>}
+            <button className="primary-button full-button" disabled={busy}>{busy ? 'Joining…' : <>Join quiz <ArrowRight size={17} /></>}</button>
+          </form>}
           <div className="hero-stamp"><span>01</span><span className="stamp-rule" /> CREATE YOUR QUIZ</div>
           <form className="builder" onSubmit={createQuiz}>
             <div className="builder-heading"><div><span className="section-kicker">THE SETUP</span><h2>Your quiz, your rules.</h2></div><span className="step-count">01 <i>/</i> 03</span></div>
@@ -200,11 +285,11 @@ export default function App() {
               <button className="primary-button full-button" disabled={busy}>{busy ? 'Joining…' : <>{event.state === 'active' ? 'Join the test' : 'Join the lobby'} <ArrowRight size={17} /></>}</button>
             </form>
           </> : participant && event.state === 'lobby' && <div className="lobby-card"><span className="lobby-orbit"><Radio size={26} /></span><div className="eyebrow"><span className="eyebrow-line" />YOU’RE IN<span className="eyebrow-line" /></div><h1 className="lobby-title">Stay close,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">You’re in the lobby for <strong>{event.title}</strong>.<br />The host will start the game soon.</p><div className="waiting-status"><span className="pulse-dot" /> WAITING FOR THE HOST</div></div>}
-          {participant && event.state !== 'lobby' && !participantStarted && <div className="lobby-card"><span className="lobby-orbit"><Check size={26} /></span><div className="eyebrow"><span className="eyebrow-line" />THE QUIZ IS READY<span className="eyebrow-line" /></div><h1 className="lobby-title">You’re up,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">{event.title} is ready. Start when you’re settled.</p><button className="primary-button participant-start-button" onClick={() => setParticipantStarted(true)}>Start the test <ArrowRight size={17} /></button></div>}
-          {participant && participantStarted && event.questions?.length > 0 && (() => {
+          {participant && event.state !== 'lobby' && !event.questions?.length && <div className="lobby-card"><span className="waiting-status"><span className="pulse-dot" /> LOADING THE TEST</span></div>}
+          {participant && event.state !== 'lobby' && event.questions?.length > 0 && (() => {
             const question = event.questions[questionIndex];
             if (!question) return <div className="lobby-card"><span className="eyebrow"><span className="eyebrow-line" />TEST COMPLETE<span className="eyebrow-line" /></span><h1 className="lobby-title">Nice work,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">You’ve completed the test.</p></div>;
-            return <div className="participant-test"><div className="eyebrow"><span className="eyebrow-line" />{event.title}<span className="eyebrow-line" /></div><div className="test-progress">QUESTION {String(questionIndex + 1).padStart(2, '0')} <span>OF {String(event.questions.length).padStart(2, '0')}</span></div><h1 className="test-question">{question.prompt}</h1><div className="test-choices">{question.choices.map((choice, index) => <button key={index} className={`test-choice ${answers[questionIndex] === index ? 'selected' : ''}`} aria-pressed={answers[questionIndex] === index} onClick={() => setAnswers((current) => ({ ...current, [questionIndex]: index }))}><span>{String.fromCharCode(65 + index)}</span>{choice}</button>)}</div><button className="primary-button test-next-button" disabled={answers[questionIndex] === undefined} onClick={() => setQuestionIndex((index) => index + 1)}>{questionIndex === event.questions.length - 1 ? 'Finish test' : 'Next question'} <ArrowRight size={17} /></button></div>;
+            return <div className="participant-test"><div className="eyebrow"><span className="eyebrow-line" />{event.title}<span className="eyebrow-line" /></div><div className="test-progress">QUESTION {String(questionIndex + 1).padStart(2, '0')} <span>OF {String(event.questions.length).padStart(2, '0')}</span></div><h1 className="test-question">{question.prompt}</h1><div className="test-choices">{question.choices.map((choice, index) => <button key={index} className={`test-choice ${answers[questionIndex] === index ? 'selected' : ''}`} aria-pressed={answers[questionIndex] === index} onClick={() => { const nextAnswers = { ...answers, [questionIndex]: index }; setAnswers(nextAnswers); saveProgress(questionIndex, nextAnswers); }}><span>{String.fromCharCode(65 + index)}</span>{choice}</button>)}</div><button className="primary-button test-next-button" disabled={answers[questionIndex] === undefined} onClick={() => { const nextQuestionIndex = questionIndex + 1; setQuestionIndex(nextQuestionIndex); saveProgress(nextQuestionIndex, answers); }}>{questionIndex === event.questions.length - 1 ? 'Finish test' : 'Next question'} <ArrowRight size={17} /></button></div>;
           })()}
         </div>}
 
