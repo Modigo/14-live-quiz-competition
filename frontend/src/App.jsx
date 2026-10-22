@@ -1,8 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowDown, ArrowLeft, ArrowRight, Check, Copy, Plus, Radio, Sparkles, Users, X } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowRight, Check, Copy, Moon, Plus, Radio, Sparkles, Sun, Users, X } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const THEME_KEY = 'quiz-aura-theme';
 const blankQuestion = () => ({ prompt: '', choices: ['', '', '', ''], correct_choice_index: 0, time_limit_seconds: 20 });
+
+function websocketUrl(path) {
+  const url = new URL(API_URL, window.location.origin);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${url.protocol}//${url.host}${url.pathname.replace(/\/$/, '')}${path}`;
+}
+
+function getInitialTheme() {
+  const theme = window.localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.style.colorScheme = theme;
+  return theme;
+}
 
 async function api(path, options = {}) {
   const response = await fetch(`${API_URL}${path}`, {
@@ -22,6 +36,7 @@ function useLocationState() {
 }
 
 export default function App() {
+  const [theme, setTheme] = useState(getInitialTheme);
   const [location, setLocation] = useLocationState();
   const [view, setView] = useState('create');
   const [error, setError] = useState('');
@@ -29,11 +44,16 @@ export default function App() {
   const [created, setCreated] = useState(null);
   const [event, setEvent] = useState(null);
   const [hostInfo, setHostInfo] = useState(null);
+  const [hostConnection, setHostConnection] = useState('connecting');
   const [participant, setParticipant] = useState(null);
   const [participantStarted, setParticipantStarted] = useState(false);
   const [clockTick, setClockTick] = useState(Date.now());
   const [optimisticAnswer, setOptimisticAnswer] = useState(null);
   const [answerSubmitting, setAnswerSubmitting] = useState(false);
+  const [joinMenuOpen, setJoinMenuOpen] = useState(false);
+  const [participantJoinForm, setParticipantJoinForm] = useState({ join_code: '', name: '', display_name: '' });
+  const [questionIndex, setQuestionIndex] = useState(0);
+  const [answers, setAnswers] = useState({});
   const [joinForm, setJoinForm] = useState({ name: '', display_name: '' });
   const [title, setTitle] = useState('');
   const [questions, setQuestions] = useState([blankQuestion()]);
@@ -43,12 +63,50 @@ export default function App() {
   const hostToken = useMemo(() => window.location.hash.slice(1), [hostEventId, location.path]);
 
   useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    window.localStorage.setItem(THEME_KEY, theme);
+  }, [theme]);
+
+  useEffect(() => {
     let alive = true;
     if (joinCode) {
       setView('join');
-      api(`/api/events/${encodeURIComponent(joinCode)}`)
-        .then((data) => alive && setEvent(data))
-        .catch((reason) => alive && setError(reason.message));
+      const reconnectToken = sessionStorage.getItem(`quiz:${joinCode}:reconnect`);
+      if (reconnectToken) {
+        api(`/api/events/${encodeURIComponent(joinCode)}/state`, {
+          headers: { Authorization: `Bearer ${reconnectToken}` },
+        }).then((data) => {
+          if (!alive) return;
+          setEvent(data);
+          setParticipant({
+            participant_id: data.participant_id,
+            display_name: data.display_name,
+            reconnect_token: reconnectToken,
+          });
+          try {
+            const progress = JSON.parse(sessionStorage.getItem(`quiz:${joinCode}:progress`) || '{}');
+            setQuestionIndex(Number.isInteger(progress.questionIndex) ? progress.questionIndex : 0);
+            setAnswers(progress.answers && typeof progress.answers === 'object' ? progress.answers : {});
+          } catch {
+            setQuestionIndex(0);
+            setAnswers({});
+          }
+        }).catch((reason) => {
+          if (!alive) return;
+          if (reason.message === 'Invalid participant link') {
+            sessionStorage.removeItem(`quiz:${joinCode}:reconnect`);
+            sessionStorage.removeItem(`quiz:${joinCode}:progress`);
+          }
+          api(`/api/events/${encodeURIComponent(joinCode)}`)
+            .then((data) => alive && setEvent(data))
+            .catch((eventError) => alive && setError(eventError.message));
+        });
+      } else {
+        api(`/api/events/${encodeURIComponent(joinCode)}`)
+          .then((data) => alive && setEvent(data))
+          .catch((reason) => alive && setError(reason.message));
+      }
     } else if (hostEventId) {
       setView('host');
       api(`/api/host/${hostEventId}`, { headers: { Authorization: `Bearer ${hostToken}` } })
@@ -59,6 +117,54 @@ export default function App() {
     }
     return () => { alive = false; };
   }, [joinCode, hostEventId, hostToken]);
+
+  useEffect(() => {
+    if (!hostEventId || !hostToken) return undefined;
+
+    let active = true;
+    let retryTimer;
+    let socket;
+    setHostConnection('connecting');
+
+    const connect = () => {
+      if (!active) return;
+      const currentSocket = new WebSocket(websocketUrl(`/api/host/${encodeURIComponent(hostEventId)}/ws`));
+      socket = currentSocket;
+      currentSocket.onopen = () => currentSocket.send(hostToken);
+      currentSocket.onmessage = (eventMessage) => {
+        let message;
+        try {
+          message = JSON.parse(eventMessage.data);
+        } catch {
+          return;
+        }
+        if (message.type === 'host_lobby') {
+          setHostInfo(message.data);
+          setHostConnection('connected');
+        } else if (message.type === 'error') {
+          setError(message.detail);
+          currentSocket.close(4403, 'Invalid host link');
+        }
+      };
+      currentSocket.onclose = (closeEvent) => {
+        if (!active) return;
+        if (closeEvent.code === 4403) {
+          setHostConnection('offline');
+          return;
+        }
+        setHostConnection('reconnecting');
+        retryTimer = window.setTimeout(connect, 1500);
+      };
+      currentSocket.onerror = () => currentSocket.close();
+    };
+
+    connect();
+    return () => {
+      active = false;
+      window.clearTimeout(retryTimer);
+      socket?.close(1000, 'Host view closed');
+    };
+  }, [hostEventId, hostToken]);
 
   useEffect(() => {
     if (!joinCode || !participant?.reconnect_token) return undefined;
@@ -139,6 +245,7 @@ export default function App() {
         method: 'POST', body: JSON.stringify(joinForm),
       });
       sessionStorage.setItem(`quiz:${joinCode}:reconnect`, result.reconnect_token);
+      sessionStorage.setItem(`quiz:${joinCode}:progress`, JSON.stringify({ questionIndex: 0, answers: {} }));
       setParticipant(result);
       setParticipantStarted(false);
       setOptimisticAnswer(null);
@@ -147,6 +254,42 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function joinByCode(eventForm) {
+    eventForm.preventDefault();
+    const code = participantJoinForm.join_code.trim().toUpperCase();
+    setBusy(true);
+    setError('');
+    try {
+      const eventInfo = await api(`/api/events/${encodeURIComponent(code)}`);
+      const result = await api(`/api/events/${encodeURIComponent(code)}/participants`, {
+        method: 'POST',
+        body: JSON.stringify({ name: participantJoinForm.name, display_name: participantJoinForm.display_name }),
+      });
+      sessionStorage.setItem(`quiz:${code}:reconnect`, result.reconnect_token);
+      sessionStorage.setItem(`quiz:${code}:progress`, JSON.stringify({ questionIndex: 0, answers: {} }));
+      window.history.pushState({}, '', `/?join=${encodeURIComponent(code)}`);
+      setLocation({ path: window.location.pathname, search: new URLSearchParams(window.location.search) });
+      setEvent(eventInfo);
+      setParticipant(result);
+      setQuestionIndex(0);
+      setAnswers({});
+      setJoinMenuOpen(false);
+      setView('join');
+    } catch (reason) {
+      setError(reason.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function saveProgress(nextQuestionIndex, nextAnswers) {
+    if (!joinCode) return;
+    sessionStorage.setItem(`quiz:${joinCode}:progress`, JSON.stringify({
+      questionIndex: nextQuestionIndex,
+      answers: nextAnswers,
+    }));
   }
 
   async function copy(value) {
@@ -208,7 +351,20 @@ export default function App() {
         <button className="brand" onClick={() => navigate('/')} aria-label="Quiz Aura home">
           <span className="brand-mark"><Sparkles size={17} /></span><span>quiz<span className="brand-light">aura</span></span>
         </button>
-        <span className="topbar-note"><span className="status-dot" /> LIVE QUIZ STUDIO</span>
+        <div className="topbar-tools">
+          <button
+            className="theme-toggle"
+            type="button"
+            aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            aria-pressed={theme === 'dark'}
+            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
+          >
+            {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+            <span>{theme === 'dark' ? 'Light' : 'Dark'} mode</span>
+          </button>
+          <span className="topbar-note"><span className="status-dot" /> LIVE QUIZ STUDIO</span>
+        </div>
       </nav>
 
       <section className="hero-wrap">
@@ -216,6 +372,22 @@ export default function App() {
           <div className="eyebrow"><span className="eyebrow-line" />MAKE A MOMENT<span className="eyebrow-line" /></div>
           <h1>Bring your<br /><span className="gradient-text">people together.</span></h1>
           <p className="hero-copy">A little friendly competition goes a long way.<br className="desktop-break" /> Build a quiz and let the room light up.</p>
+          <div className="home-join-action">
+            <button className="secondary-button" type="button" onClick={() => { setJoinMenuOpen((open) => !open); setError(''); }} aria-expanded={joinMenuOpen} aria-controls="participant-entry-form">
+              <Users size={16} /> Join a quiz
+            </button>
+          </div>
+          {joinMenuOpen && <form id="participant-entry-form" className="join-card participant-entry-card" onSubmit={joinByCode}>
+            <h2>Join with a code.</h2><p>Enter your details to join a quiz room.</p>
+            <label className="field-label" htmlFor="participant-join-code">JOIN CODE</label>
+            <input id="participant-join-code" className="text-input code-input" maxLength="8" autoComplete="off" placeholder="e.g. 9ULG0J8" value={participantJoinForm.join_code} onChange={(e) => setParticipantJoinForm({ ...participantJoinForm, join_code: e.target.value.toUpperCase() })} required />
+            <label className="field-label" htmlFor="participant-entry-name">YOUR NAME</label>
+            <input id="participant-entry-name" className="text-input" maxLength="80" autoComplete="name" placeholder="Your name" value={participantJoinForm.name} onChange={(e) => setParticipantJoinForm({ ...participantJoinForm, name: e.target.value })} required />
+            <label className="field-label" htmlFor="participant-entry-display-name">DISPLAY NAME</label>
+            <input id="participant-entry-display-name" className="text-input" maxLength="32" placeholder="How you’ll appear in the quiz" value={participantJoinForm.display_name} onChange={(e) => setParticipantJoinForm({ ...participantJoinForm, display_name: e.target.value })} required />
+            {error && <p className="error-message" role="alert">{error}</p>}
+            <button className="primary-button full-button" disabled={busy}>{busy ? 'Joining…' : <>Join quiz <ArrowRight size={17} /></>}</button>
+          </form>}
           <div className="hero-stamp"><span>01</span><span className="stamp-rule" /> CREATE YOUR QUIZ</div>
           <form className="builder" onSubmit={createQuiz}>
             <div className="builder-heading"><div><span className="section-kicker">THE SETUP</span><h2>Your quiz, your rules.</h2></div><span className="step-count">01 <i>/</i> 03</span></div>
@@ -267,12 +439,11 @@ export default function App() {
           {error && !hostInfo ? <div className="notice-card error-message" role="alert">{error}</div> : hostInfo && <>
             <div className="eyebrow"><span className="eyebrow-line" />HOST CONTROL<span className="eyebrow-line" /></div><h1 className="host-title">{hostInfo.title}<br /><span className="gradient-text">lobby.</span></h1>
             <div className="host-stats"><div className="stat-card"><span className="section-kicker">IN THE ROOM</span><strong>{String(hostInfo.participant_count).padStart(2, '0')}</strong><span className="stat-caption">of 50 players</span></div><div className="stat-card"><span className="section-kicker">JOIN CODE</span><strong className="stat-code">{hostInfo.join_code}</strong><button className="copy-inline" onClick={() => copy(hostInfo.join_code)}><Copy size={14} /> Copy code</button></div></div>
-            <div className="players-card"><div className="players-heading"><div><span className="section-kicker">THE CROWD</span><h2>Players in the lobby</h2></div><span className="live-pill"><span className="status-dot" /> {hostInfo.state.toUpperCase()}</span></div>
+            <div className="players-card"><div className="players-heading"><div><span className="section-kicker">THE CROWD</span><h2>Players in the room</h2></div><div className="host-indicators"><span className="event-state-pill">{hostInfo.state.toUpperCase()}</span><span className={`live-pill connection-${hostConnection}`}><span className="status-dot" />{hostConnection === 'connected' ? 'LIVE' : hostConnection.toUpperCase()}</span></div></div>
               {hostInfo.participants.length ? <div className="player-list">{hostInfo.participants.map((player, index) => <div className="player-row" key={`${player.display_name}-${index}`}><span className="player-avatar">{player.display_name.slice(0, 1).toUpperCase()}</span><span>{player.display_name}</span><span className="player-private">{player.name}</span></div>)}</div> : <div className="empty-players"><Users size={22} /><p>Share the join code and your players will appear here.</p></div>}
-              <button className="refresh-button" onClick={() => api(`/api/host/${hostEventId}`, { headers: { Authorization: `Bearer ${hostToken}` } }).then(setHostInfo).catch((reason) => setError(reason.message))}><Radio size={15} /> Refresh lobby</button>
               {hostInfo.state === 'lobby' ? <button className="primary-button start-quiz-button" onClick={startQuiz} disabled={busy || hostInfo.participant_count === 0}>{busy ? 'Starting…' : <>Start quiz <ArrowRight size={17} /></>}</button> : <p className="quiz-started">Quiz started.</p>}
               {error && <p className="error-message" role="alert">{error}</p>}
-            </div><p className="private-note">Lobby refresh is manual in this first iteration. Refresh to see new participants before starting.</p>
+            </div><p className="private-note">New participants appear here as they join.</p>
           </>}
         </div>}
       </section>
