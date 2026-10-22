@@ -46,6 +46,10 @@ export default function App() {
   const [hostInfo, setHostInfo] = useState(null);
   const [hostConnection, setHostConnection] = useState('connecting');
   const [participant, setParticipant] = useState(null);
+  const [participantStarted, setParticipantStarted] = useState(false);
+  const [clockTick, setClockTick] = useState(Date.now());
+  const [optimisticAnswer, setOptimisticAnswer] = useState(null);
+  const [answerSubmitting, setAnswerSubmitting] = useState(false);
   const [joinMenuOpen, setJoinMenuOpen] = useState(false);
   const [participantJoinForm, setParticipantJoinForm] = useState({ join_code: '', name: '', display_name: '' });
   const [questionIndex, setQuestionIndex] = useState(0);
@@ -169,9 +173,33 @@ export default function App() {
       headers: { Authorization: `Bearer ${participant.reconnect_token}` },
     }).then((data) => alive && setEvent(data)).catch((reason) => alive && setError(reason.message));
     refreshParticipantState();
-    const interval = window.setInterval(refreshParticipantState, 2000);
+    const interval = window.setInterval(refreshParticipantState, 1000);
     return () => { alive = false; window.clearInterval(interval); };
   }, [joinCode, participant?.reconnect_token]);
+
+  useEffect(() => {
+    if (!joinCode || participant) return undefined;
+    const reconnectToken = sessionStorage.getItem(`quiz:${joinCode}:reconnect`);
+    if (!reconnectToken) return undefined;
+    let alive = true;
+    api(`/api/events/${encodeURIComponent(joinCode)}/state`, {
+      headers: { Authorization: `Bearer ${reconnectToken}` },
+    }).then((data) => {
+      if (!alive) return;
+      setEvent(data);
+      setParticipant({ reconnect_token: reconnectToken, display_name: data.participant_display_name });
+      setParticipantStarted(data.state === 'active');
+    }).catch(() => {
+      if (alive) sessionStorage.removeItem(`quiz:${joinCode}:reconnect`);
+    });
+    return () => { alive = false; };
+  }, [joinCode, participant]);
+
+  useEffect(() => {
+    if (!event?.deadline_at) return undefined;
+    const interval = window.setInterval(() => setClockTick(Date.now()), 250);
+    return () => window.clearInterval(interval);
+  }, [event?.deadline_at]);
 
   function navigate(path) {
     window.history.pushState({}, '', path);
@@ -219,8 +247,8 @@ export default function App() {
       sessionStorage.setItem(`quiz:${joinCode}:reconnect`, result.reconnect_token);
       sessionStorage.setItem(`quiz:${joinCode}:progress`, JSON.stringify({ questionIndex: 0, answers: {} }));
       setParticipant(result);
-      setQuestionIndex(0);
-      setAnswers({});
+      setParticipantStarted(false);
+      setOptimisticAnswer(null);
     } catch (reason) {
       setError(reason.message);
     } finally {
@@ -282,6 +310,40 @@ export default function App() {
       setBusy(false);
     }
   }
+
+  async function submitAnswer(choiceIndex) {
+    const position = event?.current_question_position;
+    if (position == null || event.answer_choice_index != null || answerSubmitting) return;
+    setOptimisticAnswer({ position, choiceIndex });
+    setAnswerSubmitting(true);
+    setError('');
+    try {
+      await api(`/api/events/${encodeURIComponent(joinCode)}/answers`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${participant.reconnect_token}` },
+        body: JSON.stringify({ choice_index: choiceIndex }),
+      });
+      setEvent((current) => current?.current_question_position === position
+        ? { ...current, answer_choice_index: choiceIndex }
+        : current);
+    } catch (reason) {
+      setOptimisticAnswer(null);
+      setError(reason.message);
+    } finally {
+      setAnswerSubmitting(false);
+    }
+  }
+
+  const serverOffset = event?.server_time ? Date.parse(event.server_time) - Date.now() : 0;
+  const remainingSeconds = event?.deadline_at
+    ? Math.max(0, Math.ceil((Date.parse(event.deadline_at) - (clockTick + serverOffset)) / 1000))
+    : 0;
+  const activeQuestion = event?.current_question;
+  const answeredChoice = event?.answer_choice_index ?? (
+    optimisticAnswer && optimisticAnswer.position === event?.current_question_position
+      ? optimisticAnswer.choiceIndex
+      : null
+  );
 
   return (
     <main className="page-shell">
@@ -368,12 +430,9 @@ export default function App() {
               <button className="primary-button full-button" disabled={busy}>{busy ? 'Joining…' : <>{event.state === 'active' ? 'Join the test' : 'Join the lobby'} <ArrowRight size={17} /></>}</button>
             </form>
           </> : participant && event.state === 'lobby' && <div className="lobby-card"><span className="lobby-orbit"><Radio size={26} /></span><div className="eyebrow"><span className="eyebrow-line" />YOU’RE IN<span className="eyebrow-line" /></div><h1 className="lobby-title">Stay close,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">You’re in the lobby for <strong>{event.title}</strong>.<br />The host will start the game soon.</p><div className="waiting-status"><span className="pulse-dot" /> WAITING FOR THE HOST</div></div>}
-          {participant && event.state !== 'lobby' && !event.questions?.length && <div className="lobby-card"><span className="waiting-status"><span className="pulse-dot" /> LOADING THE TEST</span></div>}
-          {participant && event.state !== 'lobby' && event.questions?.length > 0 && (() => {
-            const question = event.questions[questionIndex];
-            if (!question) return <div className="lobby-card"><span className="eyebrow"><span className="eyebrow-line" />TEST COMPLETE<span className="eyebrow-line" /></span><h1 className="lobby-title">Nice work,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">You’ve completed the test.</p></div>;
-            return <div className="participant-test"><div className="eyebrow"><span className="eyebrow-line" />{event.title}<span className="eyebrow-line" /></div><div className="test-progress">QUESTION {String(questionIndex + 1).padStart(2, '0')} <span>OF {String(event.questions.length).padStart(2, '0')}</span></div><h1 className="test-question">{question.prompt}</h1><div className="test-choices">{question.choices.map((choice, index) => <button key={index} className={`test-choice ${answers[questionIndex] === index ? 'selected' : ''}`} aria-pressed={answers[questionIndex] === index} onClick={() => { const nextAnswers = { ...answers, [questionIndex]: index }; setAnswers(nextAnswers); saveProgress(questionIndex, nextAnswers); }}><span>{String.fromCharCode(65 + index)}</span>{choice}</button>)}</div><button className="primary-button test-next-button" disabled={answers[questionIndex] === undefined} onClick={() => { const nextQuestionIndex = questionIndex + 1; setQuestionIndex(nextQuestionIndex); saveProgress(nextQuestionIndex, answers); }}>{questionIndex === event.questions.length - 1 ? 'Finish test' : 'Next question'} <ArrowRight size={17} /></button></div>;
-          })()}
+          {participant && event.state === 'active' && !participantStarted && <div className="lobby-card"><span className="lobby-orbit"><Check size={26} /></span><div className="eyebrow"><span className="eyebrow-line" />THE QUIZ IS READY<span className="eyebrow-line" /></div><h1 className="lobby-title">You’re up,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">{event.title} is ready. The room timer is already running.</p><button className="primary-button participant-start-button" onClick={() => setParticipantStarted(true)}>Start the test <ArrowRight size={17} /></button></div>}
+          {participant && event.state === 'completed' && <div className="lobby-card"><span className="eyebrow"><span className="eyebrow-line" />TEST COMPLETE<span className="eyebrow-line" /></span><h1 className="lobby-title">Nice work,<br /><span className="gradient-text">{participant.display_name}.</span></h1><p className="hero-copy">You’ve completed the test.</p></div>}
+          {participant && participantStarted && event.state === 'active' && activeQuestion && <div className="participant-test"><div className="eyebrow"><span className="eyebrow-line" />{event.title}<span className="eyebrow-line" /></div><div className="test-progress">QUESTION {String(activeQuestion.position + 1).padStart(2, '0')} <span>OF {String(event.question_count).padStart(2, '0')}</span></div><div className={`timer-display ${remainingSeconds <= 5 ? 'timer-urgent' : ''}`} aria-live="polite"><strong>{remainingSeconds}</strong><span>SECONDS REMAINING</span></div><div className="timer-track" role="progressbar" aria-label="Question time remaining" aria-valuemin="0" aria-valuemax={activeQuestion.time_limit_seconds} aria-valuenow={Math.min(remainingSeconds, activeQuestion.time_limit_seconds)}><span style={{ width: `${Math.min(100, Math.max(0, remainingSeconds / activeQuestion.time_limit_seconds * 100))}%` }} /></div><h1 className="test-question">{activeQuestion.prompt}</h1><div className="test-choices">{activeQuestion.choices.map((choice, index) => <button key={index} className={`test-choice ${answeredChoice === index ? 'selected' : ''}`} aria-pressed={answeredChoice === index} disabled={answeredChoice != null || remainingSeconds === 0 || answerSubmitting} onClick={() => submitAnswer(index)}><span>{String.fromCharCode(65 + index)}</span>{choice}</button>)}</div>{answeredChoice != null && <p className="answer-locked">Answer locked in. The next question will appear when the timer ends.</p>}{remainingSeconds === 0 && <p className="answer-locked">Time is up. Moving to the next question…</p>}{error && <p className="error-message" role="alert">{error}</p>}</div>}
         </div>}
 
         {view === 'host' && <div className="host-wrap">
