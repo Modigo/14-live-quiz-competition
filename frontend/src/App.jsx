@@ -1,8 +1,22 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ArrowDown, ArrowLeft, ArrowRight, Check, Copy, Plus, Radio, Sparkles, Users, X } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowRight, Check, Copy, Moon, Plus, Radio, Sparkles, Sun, Users, X } from 'lucide-react';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const THEME_KEY = 'quiz-aura-theme';
 const blankQuestion = () => ({ prompt: '', choices: ['', '', '', ''], correct_choice_index: 0, time_limit_seconds: 20 });
+
+function websocketUrl(path) {
+  const url = new URL(API_URL, window.location.origin);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${url.protocol}//${url.host}${url.pathname.replace(/\/$/, '')}${path}`;
+}
+
+function getInitialTheme() {
+  const theme = window.localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = theme;
+  document.documentElement.style.colorScheme = theme;
+  return theme;
+}
 
 async function api(path, options = {}) {
   const response = await fetch(`${API_URL}${path}`, {
@@ -22,6 +36,7 @@ function useLocationState() {
 }
 
 export default function App() {
+  const [theme, setTheme] = useState(getInitialTheme);
   const [location, setLocation] = useLocationState();
   const [view, setView] = useState('create');
   const [error, setError] = useState('');
@@ -29,6 +44,7 @@ export default function App() {
   const [created, setCreated] = useState(null);
   const [event, setEvent] = useState(null);
   const [hostInfo, setHostInfo] = useState(null);
+  const [hostConnection, setHostConnection] = useState('connecting');
   const [participant, setParticipant] = useState(null);
   const [joinMenuOpen, setJoinMenuOpen] = useState(false);
   const [participantJoinForm, setParticipantJoinForm] = useState({ join_code: '', name: '', display_name: '' });
@@ -41,6 +57,12 @@ export default function App() {
   const joinCode = location.search.get('join');
   const hostEventId = location.path.startsWith('/host/') ? location.path.split('/')[2] : null;
   const hostToken = useMemo(() => window.location.hash.slice(1), [hostEventId, location.path]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    window.localStorage.setItem(THEME_KEY, theme);
+  }, [theme]);
 
   useEffect(() => {
     let alive = true;
@@ -91,6 +113,54 @@ export default function App() {
     }
     return () => { alive = false; };
   }, [joinCode, hostEventId, hostToken]);
+
+  useEffect(() => {
+    if (!hostEventId || !hostToken) return undefined;
+
+    let active = true;
+    let retryTimer;
+    let socket;
+    setHostConnection('connecting');
+
+    const connect = () => {
+      if (!active) return;
+      const currentSocket = new WebSocket(websocketUrl(`/api/host/${encodeURIComponent(hostEventId)}/ws`));
+      socket = currentSocket;
+      currentSocket.onopen = () => currentSocket.send(hostToken);
+      currentSocket.onmessage = (eventMessage) => {
+        let message;
+        try {
+          message = JSON.parse(eventMessage.data);
+        } catch {
+          return;
+        }
+        if (message.type === 'host_lobby') {
+          setHostInfo(message.data);
+          setHostConnection('connected');
+        } else if (message.type === 'error') {
+          setError(message.detail);
+          currentSocket.close(4403, 'Invalid host link');
+        }
+      };
+      currentSocket.onclose = (closeEvent) => {
+        if (!active) return;
+        if (closeEvent.code === 4403) {
+          setHostConnection('offline');
+          return;
+        }
+        setHostConnection('reconnecting');
+        retryTimer = window.setTimeout(connect, 1500);
+      };
+      currentSocket.onerror = () => currentSocket.close();
+    };
+
+    connect();
+    return () => {
+      active = false;
+      window.clearTimeout(retryTimer);
+      socket?.close(1000, 'Host view closed');
+    };
+  }, [hostEventId, hostToken]);
 
   useEffect(() => {
     if (!joinCode || !participant?.reconnect_token) return undefined;
@@ -219,7 +289,20 @@ export default function App() {
         <button className="brand" onClick={() => navigate('/')} aria-label="Quiz Aura home">
           <span className="brand-mark"><Sparkles size={17} /></span><span>quiz<span className="brand-light">aura</span></span>
         </button>
-        <span className="topbar-note"><span className="status-dot" /> LIVE QUIZ STUDIO</span>
+        <div className="topbar-tools">
+          <button
+            className="theme-toggle"
+            type="button"
+            aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            aria-pressed={theme === 'dark'}
+            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
+          >
+            {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+            <span>{theme === 'dark' ? 'Light' : 'Dark'} mode</span>
+          </button>
+          <span className="topbar-note"><span className="status-dot" /> LIVE QUIZ STUDIO</span>
+        </div>
       </nav>
 
       <section className="hero-wrap">
@@ -297,12 +380,11 @@ export default function App() {
           {error && !hostInfo ? <div className="notice-card error-message" role="alert">{error}</div> : hostInfo && <>
             <div className="eyebrow"><span className="eyebrow-line" />HOST CONTROL<span className="eyebrow-line" /></div><h1 className="host-title">{hostInfo.title}<br /><span className="gradient-text">lobby.</span></h1>
             <div className="host-stats"><div className="stat-card"><span className="section-kicker">IN THE ROOM</span><strong>{String(hostInfo.participant_count).padStart(2, '0')}</strong><span className="stat-caption">of 50 players</span></div><div className="stat-card"><span className="section-kicker">JOIN CODE</span><strong className="stat-code">{hostInfo.join_code}</strong><button className="copy-inline" onClick={() => copy(hostInfo.join_code)}><Copy size={14} /> Copy code</button></div></div>
-            <div className="players-card"><div className="players-heading"><div><span className="section-kicker">THE CROWD</span><h2>Players in the lobby</h2></div><span className="live-pill"><span className="status-dot" /> {hostInfo.state.toUpperCase()}</span></div>
+            <div className="players-card"><div className="players-heading"><div><span className="section-kicker">THE CROWD</span><h2>Players in the room</h2></div><div className="host-indicators"><span className="event-state-pill">{hostInfo.state.toUpperCase()}</span><span className={`live-pill connection-${hostConnection}`}><span className="status-dot" />{hostConnection === 'connected' ? 'LIVE' : hostConnection.toUpperCase()}</span></div></div>
               {hostInfo.participants.length ? <div className="player-list">{hostInfo.participants.map((player, index) => <div className="player-row" key={`${player.display_name}-${index}`}><span className="player-avatar">{player.display_name.slice(0, 1).toUpperCase()}</span><span>{player.display_name}</span><span className="player-private">{player.name}</span></div>)}</div> : <div className="empty-players"><Users size={22} /><p>Share the join code and your players will appear here.</p></div>}
-              <button className="refresh-button" onClick={() => api(`/api/host/${hostEventId}`, { headers: { Authorization: `Bearer ${hostToken}` } }).then(setHostInfo).catch((reason) => setError(reason.message))}><Radio size={15} /> Refresh lobby</button>
               {hostInfo.state === 'lobby' ? <button className="primary-button start-quiz-button" onClick={startQuiz} disabled={busy || hostInfo.participant_count === 0}>{busy ? 'Starting…' : <>Start quiz <ArrowRight size={17} /></>}</button> : <p className="quiz-started">Quiz started.</p>}
               {error && <p className="error-message" role="alert">{error}</p>}
-            </div><p className="private-note">Lobby refresh is manual in this first iteration. Refresh to see new participants before starting.</p>
+            </div><p className="private-note">New participants appear here as they join.</p>
           </>}
         </div>}
       </section>
