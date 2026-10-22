@@ -6,7 +6,7 @@ A live quiz MVP with a React host/participant interface and a FastAPI backend. P
 
 The initial slice supports quiz creation (1–20 questions, 2–4 answers, 5–300 second timer setting), separate participant and private host links, joining a lobby with a unique display name, and a host view of joined participants. The browser never receives correct answers through participant endpoints. Host and reconnect secrets are stored as hashes and issued only when needed.
 
-This iteration uses SQLite by default for quick local setup and accepts a PostgreSQL `DATABASE_URL`. Lobby updates are manual refreshes. Timed gameplay, WebSockets, durable reconnect, migrations, BetterAuth admin, rate limiting, and deployment are future milestones from `PLAN.md`; this is not yet production ready.
+This iteration uses SQLite by default for quick local setup and accepts a PostgreSQL `DATABASE_URL`. The host lobby receives participant updates over an authenticated WebSocket. Timed question progression and results broadcasts, durable reconnect, migrations, BetterAuth admin, rate limiting, and deployment are future milestones from `PLAN.md`; this is not yet production ready.
 
 ## Repository layout
 
@@ -56,9 +56,12 @@ Open the Vite URL (usually `http://localhost:5173`). Set `VITE_API_URL` in `fron
 - `GET /api/events/{join_code}` — return public lobby metadata.
 - `POST /api/events/{join_code}/participants` — join a lobby; returns a one-time reconnect token.
 - `GET /api/host/{event_id}` — return host-only lobby details; requires `Authorization: Bearer <token>`.
+- `WS /api/host/{event_id}/ws` — send the host token as the first text frame; receive the current lobby and updates when participants join.
 
 ## Security and development notes
 
 Treat host links and participant reconnect tokens as bearer secrets. Keep `.env` files out of version control. The host URL keeps its credential in the URL fragment so browsers do not send it as part of the HTTP request; the frontend uses it only in the authorization header. Database tables are currently created automatically at API startup; add versioned migrations before evolving a deployed database.
+
+The lobby broadcaster is in memory, so run one API worker per instance. Multi-worker deployments need shared pub/sub before they can reliably deliver lobby updates.
 
 No automated test suite or linter is configured in this first iteration. Add coverage for quiz validation, display-name conflicts, host authorization, and the complete timed game flow as those milestones are implemented.
