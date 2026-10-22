@@ -205,7 +205,13 @@ def get_participant_event_state(
     ):
         raise HTTPException(status_code=403, detail="Invalid participant link")
 
-    result = {"title": event.title, "join_code": event.join_code, "state": event.state}
+    result = {
+        "title": event.title,
+        "join_code": event.join_code,
+        "state": event.state,
+        "participant_id": participant.id,
+        "display_name": participant.display_name,
+    }
     if event.state != "lobby":
         result["questions"] = [
             {
